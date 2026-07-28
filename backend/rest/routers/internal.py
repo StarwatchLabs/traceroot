@@ -4,6 +4,7 @@ These endpoints are protected by X-Internal-Secret header and not exposed public
 """
 
 import hmac
+import json
 import logging
 from datetime import datetime
 from typing import Annotated, Any
@@ -662,6 +663,88 @@ async def list_trace_detector_runs(trace_id: str, project_id: str):
             row_dict["timestamp"] = row_dict["timestamp"].isoformat()
         runs.append(row_dict)
     return {"runs": runs}
+
+
+# Mirrors the key built by ``worker.detector_tasks._lock_key`` — that module is
+# the source of truth; this is duplicated rather than imported so the REST app
+# does not pull in the Celery worker's dependencies. Keep the two in sync.
+_DETECTION_CLAIM_KEY = "detector-enq:{project_id}:{trace_id}"
+
+_DETECTION_STATES = frozenset({"deciding", "sampled_out", "pending"})
+
+
+class TraceDetectionStateResponse(BaseModel):
+    """Authoritative per-trace detection state.
+
+    ``state`` is the worker's enqueue-claim state, or ``None`` when no claim
+    record is readable (never detected, record expired past its TTL, or Redis
+    unavailable) — callers must treat ``None`` as "no signal", not as "nothing
+    is coming".
+    """
+
+    state: str | None = None
+    detector_ids: list[str] = Field(default_factory=list)
+
+
+@router.get(
+    "/traces/{trace_id}/detection-state",
+    response_model=TraceDetectionStateResponse,
+    dependencies=[Depends(verify_internal_secret)],
+)
+async def get_trace_detection_state(trace_id: str, project_id: str):
+    """Report whether detection is queued for a trace, and which detectors ran.
+
+    The detector pipeline is asynchronous and deliberately debounced (the
+    evaluator waits for the trace to go quiet), so a freshly-ingested trace has
+    no findings or runs for roughly a minute. The worker already records the
+    outcome of its enqueue decision per trace; exposing it lets a client show an
+    honest "detection in progress" state immediately and know exactly which
+    detector runs to expect, instead of guessing with a timer.
+
+    ``sampled_out`` is authoritative and sticky: conditions/sampling rejected
+    every detector for this trace, so no runs or findings will ever appear.
+
+    Fails soft by contract: any Redis or decode error returns an empty state
+    rather than raising, so a client degrades to its own fallback instead of
+    surfacing an error for what is only a freshness hint.
+
+    Args:
+        trace_id (str): Trace whose detection state to report.
+        project_id (str): Project that owns the trace; scopes the claim key.
+
+    Returns:
+        TraceDetectionStateResponse: ``state`` one of ``deciding``,
+            ``pending``, ``sampled_out`` or ``None``, plus ``detector_ids``
+            (the detectors enqueued for this trace; empty unless ``pending``).
+    """
+    from shared.redis import get_async_redis_client
+
+    key = _DETECTION_CLAIM_KEY.format(project_id=project_id, trace_id=trace_id)
+    try:
+        raw = await get_async_redis_client().get(key)
+    except Exception:
+        logger.warning("detection-state: Redis unavailable for trace %s", trace_id, exc_info=True)
+        return TraceDetectionStateResponse()
+
+    if not raw:
+        return TraceDetectionStateResponse()
+
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("detection-state: undecodable claim payload for trace %s", trace_id)
+        return TraceDetectionStateResponse()
+    if not isinstance(payload, dict):
+        return TraceDetectionStateResponse()
+
+    state = payload.get("state")
+    # Ignore an unrecognized future state rather than leaking it to clients that
+    # branch on the known vocabulary.
+    if state not in _DETECTION_STATES:
+        state = None
+    raw_ids = payload.get("detector_ids")
+    detector_ids = [d for d in raw_ids if isinstance(d, str)] if isinstance(raw_ids, list) else []
+    return TraceDetectionStateResponse(state=state, detector_ids=detector_ids)
 
 
 def _fetch_sample_summaries(
