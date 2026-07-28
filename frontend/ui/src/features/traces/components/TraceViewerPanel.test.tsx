@@ -33,6 +33,8 @@ vi.mock("@/features/detectors/hooks/use-findings", () => ({
   useTraceFindings: () => ({ data: undefined }),
   useRca: () => ({ data: undefined }),
   useTraceDetectorRuns: () => ({ data: undefined, isLoading: false, error: null }),
+  useTraceDetectionState: () => ({ data: undefined }),
+  detectionInFlight: () => false,
 }));
 
 // Heavy children + resizable layout — replace with passthroughs so only the
