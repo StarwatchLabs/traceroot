@@ -1,0 +1,83 @@
+// @vitest-environment jsdom
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { renderHook, waitFor } from "@testing-library/react";
+import { useAiChat } from "./use-ai-chat";
+
+// Regression coverage for #935: opening a detector-flagged trace loads an RCA
+// session the worker populates out-of-band. The chat must show a working
+// indicator while that answer is still generating (authoritative status from
+// the trace view via `initialSessionPending`) and reload it when the run
+// finishes — without a manual page refresh. The old one-shot GET did neither.
+
+type Raw = { id: string; role: "user" | "assistant"; content: string; createTime: string };
+
+function msg(role: "user" | "assistant", content: string, id = `${role}-1`): Raw {
+  return { id, role, content, createTime: "2026-01-01T00:00:00Z" };
+}
+
+function ok(messages: Raw[]) {
+  return { ok: true, json: async () => ({ messages }) };
+}
+
+const PROMPT = msg("user", "Analyze this trace");
+const ANSWER = msg("assistant", "Root cause: the worker dropped the span.", "a-1");
+
+const fetchMock = vi.fn();
+
+beforeEach(() => {
+  fetchMock.mockReset();
+  vi.stubGlobal("fetch", fetchMock);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("useAiChat — RCA session working indicator (#935)", () => {
+  it("keeps the indicator up while the RCA run is pending, then reloads the answer when it completes", async () => {
+    fetchMock
+      .mockResolvedValueOnce(ok([PROMPT])) // opened while still generating
+      .mockResolvedValueOnce(ok([PROMPT, ANSWER])); // reload once the run finishes
+
+    const { result, rerender } = renderHook(
+      ({ pending }) =>
+        useAiChat({
+          projectId: "p1",
+          traceId: "t1",
+          initialSessionId: "s1",
+          initialSessionPending: pending,
+        }),
+      { initialProps: { pending: true } },
+    );
+
+    // Indicator shows immediately — driven by the authoritative running status.
+    expect(result.current.isLoadingSession).toBe(true);
+    await waitFor(() => expect(result.current.messages.map((m) => m.role)).toEqual(["user"]));
+    expect(result.current.isLoadingSession).toBe(true);
+
+    // Run finishes → status flips → the answer is reloaded and the indicator clears.
+    rerender({ pending: false });
+    expect(result.current.isLoadingSession).toBe(false);
+    await waitFor(() =>
+      expect(result.current.messages.map((m) => m.role)).toEqual(["user", "assistant"]),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows no indicator and loads once when the RCA answer is already complete on open", async () => {
+    fetchMock.mockResolvedValue(ok([PROMPT, ANSWER]));
+
+    const { result } = renderHook(() =>
+      useAiChat({
+        projectId: "p1",
+        traceId: "t1",
+        initialSessionId: "s1",
+        initialSessionPending: false,
+      }),
+    );
+
+    expect(result.current.isLoadingSession).toBe(false);
+    await waitFor(() => expect(result.current.messages).toHaveLength(2));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

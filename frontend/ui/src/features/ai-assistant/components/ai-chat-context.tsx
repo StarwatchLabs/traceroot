@@ -22,6 +22,9 @@ interface AiChatProviderProps {
   // continues attribution there. Clearing it lets the chat fall back to lazy
   // session creation on the next user message.
   initialSessionId?: string;
+  // True while the pre-loaded session is an RCA run still generating; drives the
+  // chat's working indicator and a reload-on-completion (#935).
+  initialSessionPending?: boolean;
   children: ReactNode;
 }
 
@@ -29,6 +32,7 @@ export function AiChatProvider({
   projectId,
   initialContext,
   initialSessionId,
+  initialSessionPending,
   children,
 }: AiChatProviderProps) {
   const chat = useAiChat({
@@ -36,6 +40,7 @@ export function AiChatProvider({
     traceId: initialContext?.traceId,
     traceSessionId: initialContext?.traceSessionId,
     initialSessionId,
+    initialSessionPending,
   });
   return <AiChatContext.Provider value={chat}>{children}</AiChatContext.Provider>;
 }

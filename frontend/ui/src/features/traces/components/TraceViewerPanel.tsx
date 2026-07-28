@@ -93,7 +93,9 @@ export function TraceViewerPanel({
     aiPanelOpen,
     setAiPanelOpen,
     setAiContext,
+    aiInitialSessionId,
     setAiInitialSessionId,
+    setAiInitialSessionPending,
     registerAiHost,
     sidebarCollapsed,
   } = useLayout();
@@ -139,6 +141,16 @@ export function TraceViewerPanel({
     setAiInitialSessionId(rcaSessionId);
     setAiPanelOpen(true);
   }, [autoOpenRca, rcaSessionId, traceId, setAiContext, setAiInitialSessionId, setAiPanelOpen]);
+
+  // Mirror the authoritative RCA status into the chat while this trace's RCA
+  // session is the one open in the panel, so the assistant shows a working
+  // indicator until the worker finishes and then reloads the answer (#935).
+  // useRca already polls this status, so nothing new polls here.
+  const rcaStatus = rcaData?.rca?.status;
+  useEffect(() => {
+    const pending = rcaStatus === "pending" || rcaStatus === "running";
+    setAiInitialSessionPending(!!rcaSessionId && aiInitialSessionId === rcaSessionId && pending);
+  }, [aiInitialSessionId, rcaSessionId, rcaStatus, setAiInitialSessionPending]);
 
   const {
     data: trace,

@@ -67,6 +67,7 @@ export function AiAssistantPanel({ projectId, onClose, compact = false }: AiAssi
   const {
     messages,
     isStreaming,
+    isLoadingSession,
     sessions,
     historyOpen,
     currentSessionId,
@@ -177,7 +178,7 @@ export function AiAssistantPanel({ projectId, onClose, compact = false }: AiAssi
           </div>
         </div>
       ) : (
-        <MessageList messages={messages} sessionStreaming={isStreaming} />
+        <MessageList messages={messages} sessionStreaming={isStreaming || isLoadingSession} />
       )}
 
       {/* Input */}
