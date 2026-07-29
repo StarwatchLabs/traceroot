@@ -3,11 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { useAiChat } from "./use-ai-chat";
 
-// Regression coverage for #935: opening a detector-flagged trace loads an RCA
-// session the worker populates out-of-band. The chat must show a working
-// indicator while that answer is still generating (authoritative status from
-// the trace view via `initialSessionPending`) and reload it when the run
-// finishes — without a manual page refresh. The old one-shot GET did neither.
+// Opening a detector-flagged trace pre-loads an RCA session that a worker
+// populates out-of-band, so the answer can arrive after the chat is already on
+// screen. The chat must show a working indicator while the run is still
+// generating (its owner reports that status via `initialSessionPending`) and
+// re-read the session when the run finishes, with no manual page refresh.
 
 type Raw = { id: string; role: "user" | "assistant"; content: string; createTime: string };
 
@@ -33,7 +33,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("useAiChat — RCA session working indicator (#935)", () => {
+describe("useAiChat — pre-loaded RCA session working indicator", () => {
   it("keeps the indicator up while the RCA run is pending, then reloads the answer when it completes", async () => {
     fetchMock
       .mockResolvedValueOnce(ok([PROMPT])) // opened while still generating

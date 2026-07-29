@@ -138,8 +138,8 @@ export function TraceViewerPanel({
   const hasRca = !!traceFinding && !!rcaData?.rca;
   const rcaSessionId = rcaData?.rca?.sessionId ?? undefined;
   // Detection is queued but has produced nothing yet. Evaluation is debounced by
-  // ~a minute, so without this the header sits empty for that whole time and the
-  // page looks idle; this is the earliest honest signal that work is coming.
+  // ~a minute, and this is the earliest honest signal that work is coming — it
+  // keeps the header from looking idle for that whole time.
   const { data: detection } = useTraceDetectionState(projectId, traceId);
   const detecting = !hasRca && detectionInFlight(detection);
 
@@ -153,10 +153,10 @@ export function TraceViewerPanel({
     setAiPanelOpen(true);
   }, [autoOpenRca, rcaSessionId, traceId, setAiContext, setAiInitialSessionId, setAiPanelOpen]);
 
-  // Mirror the authoritative RCA status into the chat while this trace's RCA
-  // session is the one open in the panel, so the assistant shows a working
-  // indicator until the worker finishes and then reloads the answer (#935).
-  // useRca already polls this status, so nothing new polls here.
+  // Mirror the RCA run's status into the chat while this trace's RCA session is
+  // the one open in the panel: the assistant shows a working indicator until the
+  // worker finishes writing the answer, then reloads it. useRca already polls
+  // this status, so nothing new polls here.
   const rcaStatus = rcaData?.rca?.status;
   useEffect(() => {
     const pending = rcaStatus === "pending" || rcaStatus === "running";

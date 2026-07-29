@@ -3,7 +3,7 @@
 The trace page uses this to know whether detector results are coming for a trace
 (and exactly which runs to expect) instead of guessing with a timer: evaluation
 is debounced by ~a minute, so a freshly-ingested trace has no findings or runs
-for a while and previously looked idle until a manual refresh.
+for a while and would otherwise look idle until a manual refresh.
 
 The endpoint reads the worker's per-trace enqueue-claim record, and is
 deliberately fail-soft — it is a freshness hint, not page data.
@@ -89,7 +89,7 @@ class TestTraceDetectionState:
 
     def test_non_string_detector_ids_are_dropped(self, client, mock_redis, secret):
         mock_redis.get.return_value = json.dumps({"state": "pending", "detector_ids": ["d1", 7]})
-        assert resp_ids(self._get(client, secret)) == ["d1"]
+        assert self._get(client, secret).json()["detector_ids"] == ["d1"]
 
     def test_redis_outage_fails_soft(self, client, mock_redis, secret):
         # A hint must never turn into a 500 on the trace page.
@@ -101,7 +101,3 @@ class TestTraceDetectionState:
     def test_requires_internal_secret(self, client, mock_redis):
         resp = client.get(self.URL, params={"project_id": "p1"})
         assert resp.status_code == 403
-
-
-def resp_ids(resp):
-    return resp.json()["detector_ids"]

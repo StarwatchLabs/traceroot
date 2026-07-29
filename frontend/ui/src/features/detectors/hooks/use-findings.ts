@@ -51,19 +51,26 @@ export interface PaginationMeta {
   total: number;
 }
 
-async function fetchTraceFindings(
-  projectId: string,
-  traceId: string,
-): Promise<{ findings: BackendFinding[] }> {
-  const url = `/api/projects/${projectId}/traces/${traceId}/findings`;
+/**
+ * GET a detector endpoint, surfacing the backend's `detail` as an ApiError so
+ * callers can branch on it (e.g. retention gating). `what` names the resource in
+ * the fallback message used when the error body is missing or unparseable.
+ */
+async function getJson<T>(url: string, what: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
-    const body = await res
-      .json()
-      .catch(() => ({ detail: `Failed to fetch trace findings: ${res.status}` }));
-    throw new ApiError(res.status, body.detail ?? `Failed to fetch trace findings: ${res.status}`);
+    const fallback = `Failed to fetch ${what}: ${res.status}`;
+    const body = await res.json().catch(() => ({ detail: fallback }));
+    throw new ApiError(res.status, body.detail ?? fallback);
   }
-  return res.json() as Promise<{ findings: BackendFinding[] }>;
+  return res.json() as Promise<T>;
+}
+
+function fetchTraceFindings(projectId: string, traceId: string) {
+  return getJson<{ findings: BackendFinding[] }>(
+    `/api/projects/${projectId}/traces/${traceId}/findings`,
+    "trace findings",
+  );
 }
 
 export interface DetectorRca {
@@ -76,39 +83,29 @@ export interface DetectorRca {
   createTime: string;
 }
 
-async function fetchRca(
-  projectId: string,
-  findingId: string,
-): Promise<{ rca: DetectorRca | null }> {
-  const url = `/api/projects/${projectId}/findings/${findingId}/rca`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: `Failed to fetch RCA: ${res.status}` }));
-    throw new ApiError(res.status, body.detail ?? `Failed to fetch RCA: ${res.status}`);
-  }
-  return res.json() as Promise<{ rca: DetectorRca | null }>;
+function fetchRca(projectId: string, findingId: string) {
+  return getJson<{ rca: DetectorRca | null }>(
+    `/api/projects/${projectId}/findings/${findingId}/rca`,
+    "RCA",
+  );
 }
 
-// Detector findings/runs/RCA are produced asynchronously by the worker after a
-// trace is ingested, so a trace opened live starts with none. We poll after open
-// so the Alert button, Detectors tab and RCA answer appear without a manual
-// refresh, then stop.
+// Detector findings, runs and RCA are written asynchronously by the worker after
+// a trace is ingested, so a trace opened live starts with none of them. These
+// queries poll after open — so the Alert button, Detectors tab and RCA answer
+// appear without a manual refresh — and stop as soon as what they wait for has
+// landed.
 //
-// When to stop is driven by the authoritative per-trace detection state
-// (useTraceDetectionState) rather than a guess:
-//   - "sampled_out": conditions/sampling rejected every detector, so nothing
-//     will ever appear — stop immediately and poll not at all.
-//   - "pending" with detectorIds: exactly those runs are expected, so stop the
-//     moment they have all landed.
-// The elapsed window below is only a safety net for when that signal is absent
-// (record expired past its TTL, Redis down, trace opened before the claim was
-// written) or when an expected run never materializes because its job died.
-//
-// The window has to comfortably exceed the pipeline's latency: evaluation is
-// deliberately debounced (the worker waits for the trace to go quiet — see
-// EVALUATOR_DELAY, ~60s) and jobs run under a 1-hour Celery visibility timeout
-// with no short cap, so a too-short window quits before anything exists and
-// forces the manual refresh this all exists to avoid.
+// The per-trace detection state (useTraceDetectionState) says authoritatively
+// when to stop: "sampled_out" means nothing will ever appear, and "pending"
+// names exactly the detector runs to expect. The elapsed window is only the
+// safety net for when that signal is absent (record expired past its TTL, Redis
+// down, trace opened before the claim was written) or an expected run never
+// materializes because its job died. It has to comfortably exceed pipeline
+// latency — evaluation is debounced until the trace goes quiet (EVALUATOR_DELAY,
+// ~60s) and jobs run under a 1-hour Celery visibility timeout with no short cap
+// — or polling quits before anything exists and forces the very refresh it
+// exists to avoid.
 export const TRACE_POLL_INTERVAL_MS = 3000;
 export const TRACE_POLL_WINDOW_MS = 300000;
 
@@ -138,69 +135,69 @@ export function detectionInFlight(detection: TraceDetectionState | undefined): b
 }
 
 /**
- * Poll cadence for the trace-page findings query. Stops once a finding exists
- * (the Alert button renders and useRca takes over the RCA status) or when
- * detection is ruled out; otherwise falls back to the safety-net window. Pure +
- * exported so the decision is unit-tested without driving a real interval.
+ * Shared cadence rule: keep polling while the awaited result is still
+ * outstanding, giving up at the window. `settled` is each query's own "nothing
+ * more to wait for" test. The interval functions below are pure and exported so
+ * those tests are unit-checked without driving a real interval.
+ */
+function pollUntilSettled(settled: boolean, elapsedMs: number): number | false {
+  if (settled) return false;
+  return elapsedMs < TRACE_POLL_WINDOW_MS ? TRACE_POLL_INTERVAL_MS : false;
+}
+
+/**
+ * Findings cadence: settled once a finding exists — the Alert button renders and
+ * useRca takes over from there — or once detection is ruled out.
  */
 export function findingsPollInterval(
   findingCount: number,
   elapsedMs: number,
   detection?: TraceDetectionState,
 ): number | false {
-  if (findingCount > 0) return false;
-  if (detectionRuledOut(detection)) return false;
-  return elapsedMs < TRACE_POLL_WINDOW_MS ? TRACE_POLL_INTERVAL_MS : false;
+  return pollUntilSettled(findingCount > 0 || detectionRuledOut(detection), elapsedMs);
 }
 
 /**
- * Poll cadence for the trace-page detector-runs query. Runs are written only
- * when a detector finishes evaluating, so there is no in-flight row to watch —
- * instead we stop as soon as every enqueued detector has a run (the precise
- * completion signal), or immediately when detection is ruled out, and otherwise
- * fall back to the window. Pure + exported for unit testing.
+ * Detector-runs cadence: a run row is written only when its detector finishes,
+ * so there is no in-flight row to watch. Settled once every enqueued detector
+ * has a run — the precise completion signal — or once detection is ruled out.
  */
 export function detectorRunsPollInterval(
   runCount: number,
   elapsedMs: number,
   detection?: TraceDetectionState,
 ): number | false {
-  if (detectionRuledOut(detection)) return false;
   const expected = detection?.state === "pending" ? detection.detectorIds.length : 0;
-  if (expected > 0 && runCount >= expected) return false;
-  return elapsedMs < TRACE_POLL_WINDOW_MS ? TRACE_POLL_INTERVAL_MS : false;
+  return pollUntilSettled(
+    detectionRuledOut(detection) || (expected > 0 && runCount >= expected),
+    elapsedMs,
+  );
 }
 
 /**
- * Poll cadence for the detection-state record itself. "pending" and
- * "sampled_out" are sticky for the record's TTL, so once either is read there is
- * nothing further to learn; only the transient "deciding" is worth re-reading.
- * A missing record is not re-polled — that would add a standing poll to every
- * historical trace view for a race the results window already covers.
+ * Detection-state cadence: "pending" and "sampled_out" are sticky for the
+ * record's TTL, so once either is read there is nothing further to learn, and a
+ * missing record is not re-read — that would put a standing poll on every
+ * historical trace view for a race the results window already covers. Only the
+ * transient "deciding" is worth another look.
  */
 export function detectionStatePollInterval(state: DetectionStateValue): number | false {
   return state === "deciding" ? TRACE_POLL_INTERVAL_MS : false;
 }
 
 /**
- * Poll cadence for a finding's RCA. Polls while the run is in flight
- * (pending/running). Crucially, it ALSO polls while the row does not exist yet
- * (status undefined) but only within the window: the worker writes the finding
- * first and creates the DetectorRca row a moment later, so a just-surfaced
- * finding briefly has no row. Without this the query would stop on that first
- * empty fetch and the Alert button would need a manual refresh to appear. A
- * detector with RCA disabled never creates a row, so the window bounds that
- * case. Stops on a terminal status (done/failed). Pure + exported for testing.
+ * RCA cadence: polls while the run is in flight, and — bounded by the window —
+ * while the row is still absent, because the worker writes the finding first and
+ * the DetectorRca row a moment later, so a just-surfaced finding briefly has no
+ * row at all. The window also bounds a detector with RCA disabled, which never
+ * gets a row.
  */
 export function rcaPollInterval(
   status: DetectorRca["status"] | undefined,
   elapsedMs: number,
 ): number | false {
   if (status === "pending" || status === "running") return TRACE_POLL_INTERVAL_MS;
-  if (status === undefined) {
-    return elapsedMs < TRACE_POLL_WINDOW_MS ? TRACE_POLL_INTERVAL_MS : false;
-  }
-  return false; // done | failed
+  return pollUntilSettled(status !== undefined, elapsedMs); // done | failed => settled
 }
 
 /**
@@ -263,11 +260,7 @@ export interface RunsResponse {
   meta: PaginationMeta;
 }
 
-async function fetchRuns(
-  projectId: string,
-  detectorId: string,
-  query: RunsQuery = {},
-): Promise<RunsResponse> {
+function fetchRuns(projectId: string, detectorId: string, query: RunsQuery = {}) {
   const params = new URLSearchParams();
   if (query.page !== undefined) params.set("page", String(query.page));
   if (query.limit !== undefined) params.set("limit", String(query.limit));
@@ -277,13 +270,10 @@ async function fetchRuns(
   if (query.identified) params.set("identified", "true");
 
   const qs = params.toString();
-  const url = `/api/projects/${projectId}/detectors/${detectorId}/runs${qs ? `?${qs}` : ""}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: `Failed to fetch runs: ${res.status}` }));
-    throw new ApiError(res.status, body.detail ?? `Failed to fetch runs: ${res.status}`);
-  }
-  return res.json() as Promise<RunsResponse>;
+  return getJson<RunsResponse>(
+    `/api/projects/${projectId}/detectors/${detectorId}/runs${qs ? `?${qs}` : ""}`,
+    "runs",
+  );
 }
 
 export function useRuns(projectId: string, detectorId: string, query: RunsQuery = {}) {
@@ -354,22 +344,11 @@ export function useTraceFindings(projectId: string, traceId: string) {
   });
 }
 
-async function fetchTraceDetectorRuns(
-  projectId: string,
-  traceId: string,
-): Promise<{ runs: BackendRun[] }> {
-  const url = `/api/projects/${projectId}/traces/${traceId}/detector-runs`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const body = await res
-      .json()
-      .catch(() => ({ detail: `Failed to fetch trace detector runs: ${res.status}` }));
-    throw new ApiError(
-      res.status,
-      body.detail ?? `Failed to fetch trace detector runs: ${res.status}`,
-    );
-  }
-  return res.json() as Promise<{ runs: BackendRun[] }>;
+function fetchTraceDetectorRuns(projectId: string, traceId: string) {
+  return getJson<{ runs: BackendRun[] }>(
+    `/api/projects/${projectId}/traces/${traceId}/detector-runs`,
+    "trace detector runs",
+  );
 }
 
 export function useTraceDetectorRuns(projectId: string, traceId: string) {

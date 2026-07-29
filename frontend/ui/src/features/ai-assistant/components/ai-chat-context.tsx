@@ -22,8 +22,8 @@ interface AiChatProviderProps {
   // continues attribution there. Clearing it lets the chat fall back to lazy
   // session creation on the next user message.
   initialSessionId?: string;
-  // True while the pre-loaded session is an RCA run still generating; drives the
-  // chat's working indicator and a reload-on-completion (#935).
+  // True while the pre-loaded session's answer is still being written by a
+  // worker; see UseAiChatOptions.initialSessionPending.
   initialSessionPending?: boolean;
   children: ReactNode;
 }

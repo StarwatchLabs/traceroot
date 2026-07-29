@@ -16,11 +16,11 @@ import {
   type TraceDetectionState,
 } from "./use-findings";
 
-// Regression coverage for the trace-page live-update gap: detector findings and
-// runs are produced asynchronously (and deliberately debounced ~1min) after
-// ingestion, so a trace opened live must poll to surface the Alert button +
-// Detectors tab without a manual refresh — and must stop precisely, driven by
-// the authoritative detection state rather than a timer guess.
+// Detector findings and runs are produced asynchronously (and deliberately
+// debounced ~1min) after ingestion, so a trace opened live must poll to surface
+// the Alert button and Detectors tab without a manual refresh — and must stop
+// precisely, driven by the authoritative detection state rather than a timer
+// guess. These cases pin down each stop condition.
 
 const PENDING = (ids: string[]): TraceDetectionState => ({ state: "pending", detectorIds: ids });
 const SAMPLED_OUT: TraceDetectionState = { state: "sampled_out", detectorIds: [] };
@@ -133,8 +133,8 @@ describe("rcaPollInterval — RCA poll cadence through the finding→row gap", (
   });
 
   it("keeps polling when the RCA row doesn't exist yet, within the window", () => {
-    // The worker writes the finding first, so the just-surfaced finding briefly
-    // has no RCA row (status undefined). This is the case the old code dropped.
+    // The worker writes the finding first, so a just-surfaced finding briefly
+    // has no RCA row at all (status undefined) and must still be waited on.
     expect(rcaPollInterval(undefined, 0)).toBe(TRACE_POLL_INTERVAL_MS);
     expect(rcaPollInterval(undefined, TRACE_POLL_WINDOW_MS - 1)).toBe(TRACE_POLL_INTERVAL_MS);
   });
@@ -149,6 +149,35 @@ describe("rcaPollInterval — RCA poll cadence through the finding→row gap", (
   });
 });
 
+/**
+ * Renders useTraceFindings against a stubbed backend and returns a live count of
+ * findings fetches. Requests are routed by URL because the hook also reads the
+ * detection-state record — counting raw fetch calls would conflate the two.
+ * `findingsOnCall` returns the findings array for the nth findings fetch.
+ */
+function renderTraceFindings(
+  detectionState: { state: string; detector_ids: string[] },
+  findingsOnCall: (call: number) => unknown[],
+) {
+  const calls = { findings: 0 };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/detection-state")) {
+        return { ok: true, json: async () => detectionState };
+      }
+      const call = ++calls.findings;
+      return { ok: true, json: async () => ({ findings: findingsOnCall(call) }) };
+    }),
+  );
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  renderHook(() => useTraceFindings("p1", "t1"), {
+    wrapper: ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children),
+  });
+  return calls;
+}
+
 describe("useTraceFindings — polling is wired to the interval", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -157,66 +186,32 @@ describe("useTraceFindings — polling is wired to the interval", () => {
 
   it("keeps fetching while findings are empty, then stops once one arrives", async () => {
     vi.useFakeTimers();
-    // Route by URL: the hook also reads the detection-state record, so counting
-    // raw calls would conflate the two queries.
-    let findingsCalls = 0;
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes("/detection-state")) {
-        // Detection is queued for one detector — keeps the gate open.
-        return { ok: true, json: async () => ({ state: "pending", detector_ids: ["d1"] }) };
-      }
-      findingsCalls += 1;
-      // Empty for the first two polls (the worker hasn't flagged yet), then flagged.
-      return {
-        ok: true,
-        json: async () =>
-          findingsCalls > 2
-            ? { findings: [{ finding_id: "f1", trace_id: "t1" }] }
-            : { findings: [] },
-      };
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) =>
-      createElement(QueryClientProvider, { client }, children);
-
-    renderHook(() => useTraceFindings("p1", "t1"), { wrapper });
+    // Detection is queued for one detector, so the gate stays open. Empty for the
+    // first two polls (the worker hasn't flagged yet), then flagged.
+    const calls = renderTraceFindings({ state: "pending", detector_ids: ["d1"] }, (call) =>
+      call > 2 ? [{ finding_id: "f1", trace_id: "t1" }] : [],
+    );
 
     // Initial fetch.
     await vi.advanceTimersByTimeAsync(0);
-    expect(findingsCalls).toBe(1);
+    expect(calls.findings).toBe(1);
 
     // Two poll ticks: empty, empty → keeps polling.
     await vi.advanceTimersByTimeAsync(TRACE_POLL_INTERVAL_MS);
     await vi.advanceTimersByTimeAsync(TRACE_POLL_INTERVAL_MS);
-    expect(findingsCalls).toBe(3);
+    expect(calls.findings).toBe(3);
 
     // The third response carried a finding → polling stops; further time is inert.
     await vi.advanceTimersByTimeAsync(TRACE_POLL_INTERVAL_MS * 4);
-    expect(findingsCalls).toBe(3);
+    expect(calls.findings).toBe(3);
   });
 
   it("never polls when detection is sampled out (no detector will ever run)", async () => {
     vi.useFakeTimers();
-    let findingsCalls = 0;
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes("/detection-state")) {
-        return { ok: true, json: async () => ({ state: "sampled_out", detector_ids: [] }) };
-      }
-      findingsCalls += 1;
-      return { ok: true, json: async () => ({ findings: [] }) };
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    const calls = renderTraceFindings({ state: "sampled_out", detector_ids: [] }, () => []);
 
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) =>
-      createElement(QueryClientProvider, { client }, children);
-
-    renderHook(() => useTraceFindings("p1", "t1"), { wrapper });
-    await vi.advanceTimersByTimeAsync(0);
     // One initial read, then nothing — the authoritative "nothing coming".
     await vi.advanceTimersByTimeAsync(TRACE_POLL_INTERVAL_MS * 5);
-    expect(findingsCalls).toBe(1);
+    expect(calls.findings).toBe(1);
   });
 });

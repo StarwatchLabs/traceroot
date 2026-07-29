@@ -699,14 +699,13 @@ async def get_trace_detection_state(trace_id: str, project_id: str):
     no findings or runs for roughly a minute. The worker already records the
     outcome of its enqueue decision per trace; exposing it lets a client show an
     honest "detection in progress" state immediately and know exactly which
-    detector runs to expect, instead of guessing with a timer.
+    detector runs to expect, instead of guessing with a timer. ``sampled_out`` is
+    sticky: conditions/sampling rejected every detector for this trace, so no run
+    or finding will ever appear.
 
-    ``sampled_out`` is authoritative and sticky: conditions/sampling rejected
-    every detector for this trace, so no runs or findings will ever appear.
-
-    Fails soft by contract: any Redis or decode error returns an empty state
-    rather than raising, so a client degrades to its own fallback instead of
-    surfacing an error for what is only a freshness hint.
+    Fails soft by contract — an unreadable claim record yields an empty state
+    rather than an error, so a client degrades to its own fallback instead of
+    seeing the trace page break over what is only a freshness hint.
 
     Args:
         trace_id (str): Trace whose detection state to report.
@@ -722,29 +721,25 @@ async def get_trace_detection_state(trace_id: str, project_id: str):
     key = _DETECTION_CLAIM_KEY.format(project_id=project_id, trace_id=trace_id)
     try:
         raw = await get_async_redis_client().get(key)
+        payload = json.loads(raw) if raw else None
     except Exception:
-        logger.warning("detection-state: Redis unavailable for trace %s", trace_id, exc_info=True)
+        # Redis down or a payload we cannot decode — both are "no signal".
+        logger.warning("detection-state: unreadable claim for trace %s", trace_id, exc_info=True)
         return TraceDetectionStateResponse()
 
-    if not raw:
-        return TraceDetectionStateResponse()
-
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError):
-        logger.warning("detection-state: undecodable claim payload for trace %s", trace_id)
-        return TraceDetectionStateResponse()
     if not isinstance(payload, dict):
         return TraceDetectionStateResponse()
 
-    state = payload.get("state")
-    # Ignore an unrecognized future state rather than leaking it to clients that
+    # Drop an unrecognized future state rather than leaking it to clients that
     # branch on the known vocabulary.
-    if state not in _DETECTION_STATES:
-        state = None
+    state = payload.get("state")
     raw_ids = payload.get("detector_ids")
-    detector_ids = [d for d in raw_ids if isinstance(d, str)] if isinstance(raw_ids, list) else []
-    return TraceDetectionStateResponse(state=state, detector_ids=detector_ids)
+    return TraceDetectionStateResponse(
+        state=state if state in _DETECTION_STATES else None,
+        detector_ids=[d for d in raw_ids if isinstance(d, str)]
+        if isinstance(raw_ids, list)
+        else [],
+    )
 
 
 def _fetch_sample_summaries(

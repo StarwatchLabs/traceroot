@@ -24,10 +24,11 @@ function mapSessionMessages(data: { messages?: RawSessionMessage[] } | null): AI
 interface UseAiChatOptions extends AiTraceContext {
   projectId: string | undefined;
   initialSessionId?: string; // pre-load an existing session (e.g. RCA session from Step 2)
-  // True while the pre-loaded session is a detector RCA run that is still
-  // generating (worker status pending/running). Drives the working indicator
-  // and triggers a one-time reload when it flips false so the answer appears
-  // without a manual refresh (#935). The trace view already polls this status.
+  // True while a worker is still writing that session's answer (an RCA run in
+  // pending/running). Drives the working indicator, and its flip to false
+  // reloads the session so the finished answer appears without a manual
+  // refresh. The owner of this flag already tracks the status, so the chat
+  // never polls for it itself.
   initialSessionPending?: boolean;
 }
 
@@ -49,7 +50,8 @@ export function useAiChat({
   // (session creation + first network round-trip). Without this, React 19 can batch
   // setIsStreaming(true) and setIsStreaming(false) into a single frame, hiding the button.
   const [isSending, setIsSending] = useState(false);
-  // Working indicator for a pre-loaded RCA session that is still generating.
+  // Working indicator for a pre-loaded session whose answer is still being
+  // written elsewhere; see initialSessionPending.
   const [isLoadingSession, setIsLoadingSession] = useState(false);
   // The session id we last cleared messages for, so a status-driven reload of
   // the same session doesn't flash the list empty.
@@ -70,12 +72,11 @@ export function useAiChat({
     setMessages([]);
   }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load a pre-loaded session's messages on open, and reload once its RCA run
-  // finishes (initialSessionPending: true → false) so the worker-populated
-  // answer appears without a manual refresh (#935). The indicator mirrors that
-  // authoritative status — which the trace view already polls — so there is no
-  // polling here. AbortController guards against a stale fetch overwriting a
-  // newer session's messages.
+  // Load a pre-loaded session's messages on open, and load them again when
+  // initialSessionPending flips false — that is the one signal that a
+  // worker-written answer has landed, so re-reading then is what makes it appear
+  // without a manual refresh. AbortController guards against a stale fetch
+  // overwriting a newer session's messages.
   useEffect(() => {
     if (!initialSessionId || !projectId) return;
     sessionIdRef.current = initialSessionId;
